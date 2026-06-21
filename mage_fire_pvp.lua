@@ -1,205 +1,254 @@
 -- ============================================================
---  Mage Fire - Routine PvP
---  Compatible NilName Unlocker API
---  Usage : charger via NilName > Scripts > Load File
+--  Mage Fire Sunfury — Routine PvP
+--  WoW Midnight 12.0.7
+--  NilName Unlocker — API : Unlock() / NnBasic
+-- ============================================================
+--
+--  Chargement : coller dans le panel NilName > Script
+--  Commandes  : /fire start | /fire stop
+--
 -- ============================================================
 
-local Routine = {}
-Routine.__index = Routine
+-- ── NilName : wrapper Unlock() ──────────────────────────────
+--
+--  NilName expose les fonctions protégées via :
+--    Unlock('FunctionName', arg1, arg2, ...)
+--  ou directement si NnBasic les a déjà débloquées.
 
--- ── Utilitaires NilName ─────────────────────────────────────
-
-local NN  = NilName          -- namespace principal de l'unlocker
-local API = NN and NN.API    -- fonctions d'accès unitaire
-
-local function Cast(spellName)
-    if NN and NN.CastSpell then
-        NN.CastSpell(spellName)
+local function Cast(spellName, unit)
+    unit = unit or "target"
+    -- Essai via Unlock (méthode NilName recommandée)
+    if Unlock then
+        Unlock("CastSpellByName", spellName, unit)
     else
-        CastSpellByName(spellName)   -- fallback API standard
+        CastSpellByName(spellName, unit)
     end
 end
 
 local function SpellReady(spellName)
     local start, duration = GetSpellCooldown(spellName)
-    if start == nil then return false end
-    return (start == 0) or (GetTime() >= start + duration)
+    if not start then return false end
+    return start == 0 or (GetTime() - start >= duration)
 end
 
-local function HasBuff(unit, buffName)
+local function HasBuff(unit, name)
     local i = 1
     while true do
-        local name = UnitBuff(unit, i)
-        if not name then break end
-        if name == buffName then return true end
+        local n = UnitBuff(unit, i)
+        if not n then break end
+        if n == name then return true end
         i = i + 1
     end
     return false
 end
 
-local function HasDebuff(unit, debuffName)
+local function HasDebuff(unit, name)
     local i = 1
     while true do
-        local name = UnitDebuff(unit, i)
-        if not name then break end
-        if name == debuffName then return true end
+        local n = UnitDebuff(unit, i)
+        if not n then break end
+        if n == name then return true end
         i = i + 1
     end
     return false
 end
 
 local function HealthPct(unit)
-    local hp  = UnitHealth(unit)
     local max = UnitHealthMax(unit)
     if max == 0 then return 0 end
-    return (hp / max) * 100
+    return UnitHealth(unit) / max * 100
 end
 
-local function ManaPct()
-    local m   = UnitMana("player")
-    local max = UnitManaMax("player")
-    if max == 0 then return 0 end
-    return (m / max) * 100
+local function IsCasting(unit)
+    local spell = UnitCastingInfo(unit)
+    if spell then return spell end
+    return UnitChannelInfo(unit)
 end
 
-local function InRange(unit)
-    -- NilName expose souvent IsSpellInRange ou GetDistance
-    if NN and NN.GetDistance then
-        return NN.GetDistance(unit) <= 35
-    end
-    return IsSpellInRange("Fireball", unit) == 1
+local function InRange(unit, spell)
+    spell = spell or "Fireball"
+    return IsSpellInRange(spell, unit) == 1
 end
+
+-- ── Spells & Buffs Midnight 12.0.7 ─────────────────────────
+
+local S = {
+    -- Fillers
+    Fireball        = "Fireball",
+    FrostfireBolt   = "Frostfire Bolt",   -- variante Frostfire build
+    Scorch          = "Scorch",
+
+    -- Procs / instants
+    Pyroblast       = "Pyroblast",
+    FireBlast       = "Fire Blast",
+    Flamestrike     = "Flamestrike",
+
+    -- Cooldowns offensifs
+    Combustion      = "Combustion",
+    MirrorImage     = "Mirror Image",
+
+    -- Utilitaires / CC
+    Polymorph       = "Polymorph",
+    FrostNova       = "Frost Nova",
+    Blink           = "Blink",
+    Counterspell    = "Counterspell",
+    SpellSteal      = "Spellsteal",
+
+    -- Défensifs
+    IceBlock        = "Ice Block",
+    Cauterize       = "Cauterize",         -- talent cheat-death passif
+    ShiftingPower   = "Shifting Power",    -- supprimé en Midnight, ignoré
+}
+
+local BUFFS = {
+    HotStreak       = "Hot Streak",
+    HeatingUp       = "Heating Up",
+    Combustion      = "Combustion",
+    FiredUp         = "Fired Up",          -- talent Apex : bonus dégâts feu
+    Hyperthermia    = "Hyperthermia",      -- fenêtre post-Combustion (Sunfury)
+    IceBlock        = "Ice Block",
+}
+
+-- ── Logique de rotation ─────────────────────────────────────
 
 local function IsValidTarget()
     return UnitExists("target")
         and UnitCanAttack("player", "target")
         and not UnitIsDead("target")
-        and InRange("target")
+        and InRange("target", S.Fireball)
 end
 
--- ── Spells Fire (noms génériques — adapter si le serveur
---   utilise des IDs spécifiques à Midnight) ─────────────────
-
-local SPELLS = {
-    Fireball        = "Fireball",
-    Pyroblast       = "Pyroblast",
-    FireBlast       = "Fire Blast",
-    Scorch          = "Scorch",
-    LivingBomb      = "Living Bomb",
-    Combustion      = "Combustion",
-    DragonBreath    = "Dragon's Breath",
-    BlastWave       = "Blast Wave",
-    IcyVeins        = "Icy Veins",         -- dispo si spec le permet
-    IceBlock        = "Ice Block",
-    Counterspell    = "Counterspell",
-    Blink           = "Blink",
-    MirrorImage     = "Mirror Image",
-    FireballVolley  = "Flamestrike",
-    Arcane          = "Arcane Explosion",
-}
-
--- ── Rotation principale ─────────────────────────────────────
+local inCombustion = false
 
 local function RotationFire()
     if not IsValidTarget() then return end
+    if UnitIsDead("player") or UnitIsGhost("player") then return end
 
-    local hp     = HealthPct("player")
-    local target = "target"
+    local hp      = HealthPct("player")
+    local tgt     = "target"
+    local tgtHP   = HealthPct(tgt)
+    local inComb  = HasBuff("player", BUFFS.Combustion)
+    local hyper   = HasBuff("player", BUFFS.Hyperthermia)
+    local hotStr  = HasBuff("player", BUFFS.HotStreak)
+    local heatUp  = HasBuff("player", BUFFS.HeatingUp)
 
-    -- Défense : Ice Block si < 15 % HP
-    if hp < 15 and SpellReady(SPELLS.IceBlock) then
-        Cast(SPELLS.IceBlock)
+    -- ── Défensifs ────────────────────────────────────────────
+
+    -- Ice Block si HP critique (< 10 %)
+    if hp < 10 and SpellReady(S.IceBlock) and not HasBuff("player", BUFFS.IceBlock) then
+        Cast(S.IceBlock, "player")
         return
     end
 
-    -- Blink si ciblé en mêlée (optionnel, dépend de ton setup)
-    -- Cast(SPELLS.Blink)
+    -- Blink pour s'échapper du gap-close (à gérer avec une condition
+    -- de distance si NilName expose NnObject:GetDistance)
+    -- if NeedsBlink() and SpellReady(S.Blink) then Cast(S.Blink, "player") return end
 
-    -- Interrupt : Counterspell si la cible est en train de caster
-    if UnitCastingInfo and UnitCastingInfo(target) and SpellReady(SPELLS.Counterspell) then
-        Cast(SPELLS.Counterspell)
+    -- ── Interrupt ────────────────────────────────────────────
+
+    if IsCasting(tgt) and SpellReady(S.Counterspell) then
+        Cast(S.Counterspell)
         return
     end
 
-    -- Burst : Combustion + Mirror Image si disponibles
-    if SpellReady(SPELLS.Combustion) then
-        Cast(SPELLS.Combustion)
-    end
-    if SpellReady(SPELLS.MirrorImage) then
-        Cast(SPELLS.MirrorImage)
-    end
+    -- ── Spellsteal (buff précieux sur la cible) ──────────────
+    -- (à activer manuellement ou avec une liste de buffs stealables)
+    -- if SpellReady(S.SpellSteal) then Cast(S.SpellSteal) return end
 
-    -- Living Bomb (DoT) si absent sur la cible
-    if not HasDebuff(target, SPELLS.LivingBomb) and SpellReady(SPELLS.LivingBomb) then
-        Cast(SPELLS.LivingBomb)
+    -- ── Burst : ouverture Combustion ─────────────────────────
+
+    if SpellReady(S.Combustion) and SpellReady(S.MirrorImage) then
+        Cast(S.MirrorImage, "player")
+        Cast(S.Combustion, "player")
         return
     end
 
-    -- Pyroblast si Hot Streak proc (buff "Hot Streak")
-    if HasBuff("player", "Hot Streak") and SpellReady(SPELLS.Pyroblast) then
-        Cast(SPELLS.Pyroblast)
+    -- ── Fenêtre Combustion / Hyperthermia ────────────────────
+    --  Pendant Combustion tout crit → Fire Blast + Pyroblast en boucle.
+    --  Hyperthermia (Sunfury) donne 6s de Pyroblast instants après Combustion.
+
+    if inComb or hyper then
+        if hotStr and SpellReady(S.Pyroblast) then
+            Cast(S.Pyroblast)
+            return
+        end
+        if SpellReady(S.FireBlast) then
+            Cast(S.FireBlast)
+            return
+        end
+        -- Pendant Combustion les fillers sont des Pyroblasts si Hot Streak
+        Cast(S.Fireball)
         return
     end
 
-    -- Fire Blast pour stacker Heating Up
-    if SpellReady(SPELLS.FireBlast) then
-        Cast(SPELLS.FireBlast)
+    -- ── Hors Combustion : rotation soutenue ─────────────────
+
+    -- Hot Streak proc → Pyroblast instant (ou Flamestrike si AoE)
+    if hotStr then
+        if SpellReady(S.Pyroblast) then
+            Cast(S.Pyroblast)
+            return
+        end
+    end
+
+    -- Fire Blast : convertit Heating Up en Hot Streak (CD court)
+    -- Utiliser uniquement si Heating Up est actif pour économiser les charges
+    if heatUp and SpellReady(S.FireBlast) then
+        Cast(S.FireBlast)
         return
     end
 
-    -- Scorch si en mouvement ou pour maintenir la vulnérabilité feu
-    if SpellReady(SPELLS.Scorch) then
-        Cast(SPELLS.Scorch)
+    -- Scorch sous 30 % HP cible (crit garanti en Midnight)
+    if tgtHP < 30 and SpellReady(S.Scorch) then
+        Cast(S.Scorch)
         return
     end
 
-    -- Fireball — sort de base
-    Cast(SPELLS.Fireball)
+    -- Filler principal : Fireball (ou Frostfire Bolt si build Frostfire)
+    Cast(S.Fireball)
 end
 
--- ── Boucle principale (tick toutes les 100 ms) ─────────────
+-- ── CC utilitaire (appel manuel via /firepoly) ──────────────
+
+local function CastPolymorph()
+    if UnitExists("target") and SpellReady(S.Polymorph) then
+        Cast(S.Polymorph)
+    end
+end
+
+local function CastFrostNova()
+    if SpellReady(S.FrostNova) then
+        Unlock and Unlock("CastSpellByName", S.FrostNova) or CastSpellByName(S.FrostNova)
+    end
+end
+
+-- ── Boucle principale ────────────────────────────────────────
 
 local ticker
 
 local function StartRoutine()
     if ticker then ticker:Cancel() end
-    ticker = C_Timer.NewTicker(0.1, function()
-        -- Ne rien faire si le joueur est en train de caster / mort
-        if UnitIsDead("player") or UnitIsGhost("player") then return end
-        RotationFire()
-    end)
-    print("[Routine] Mage Fire PvP — démarrée")
+    ticker = C_Timer.NewTicker(0.1, RotationFire)
+    print("|cff00ff00[MageFire]|r Routine démarrée — /fire stop pour arrêter")
 end
 
 local function StopRoutine()
-    if ticker then
-        ticker:Cancel()
-        ticker = nil
-    end
-    print("[Routine] Mage Fire PvP — arrêtée")
+    if ticker then ticker:Cancel(); ticker = nil end
+    print("|cffff4400[MageFire]|r Routine arrêtée")
 end
 
--- ── Commandes slash ─────────────────────────────────────────
+-- ── Commandes slash ──────────────────────────────────────────
 
 SLASH_MAGEFIRE1 = "/fire"
 SlashCmdList["MAGEFIRE"] = function(msg)
-    local cmd = msg:lower():match("^%s*(.-)%s*$")
-    if cmd == "start" or cmd == "" then
-        StartRoutine()
-    elseif cmd == "stop" then
-        StopRoutine()
+    local cmd = (msg or ""):lower():match("^%s*(.-)%s*$")
+    if cmd == "start" or cmd == "" then StartRoutine()
+    elseif cmd == "stop"           then StopRoutine()
+    elseif cmd == "poly"           then CastPolymorph()
+    elseif cmd == "nova"           then CastFrostNova()
     else
-        print("Usage : /fire [start|stop]")
+        print("|cff00ccff[MageFire]|r Commandes : /fire start | stop | poly | nova")
     end
 end
 
--- ── Point d'entrée NilName (si l'unlocker charge le fichier) ─
-
-if NN and NN.RegisterScript then
-    NN.RegisterScript("MageFirePvP", {
-        OnStart = StartRoutine,
-        OnStop  = StopRoutine,
-    })
-end
-
-print("[Routine] Mage Fire PvP chargée — /fire start | /fire stop")
+print("|cff00ccff[MageFire]|r Mage Fire PvP (Midnight 12.0.7) chargé — /fire start")
